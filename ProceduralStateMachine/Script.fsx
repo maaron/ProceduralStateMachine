@@ -35,7 +35,7 @@ module Proc =
         | MachineCommand of 'c
 
     type Context<'s, 'e, 'c> = {
-        nextTimerId: int
+        nextTimerId: TimerId
         machine: M<'s, 'e, 'c>
         state: 's
         command: 'c
@@ -45,6 +45,7 @@ module Proc =
 
     type Result<'a> =
         | Cancelled
+        | Timedout of TimerId
         | Exception of System.Exception
         | Completed of 'a
 
@@ -69,14 +70,14 @@ module Proc =
             async {
                 let mutable state = context.state
                 let mutable command = context.command
-                let mutable result = Option.None
+                let mutable result = None
                 while result.IsNone do
                     context.processor(command);
                     let! event = context.events ()
                     result <- 
                         match event with
-                        | Cancel -> result
-                        | Timeout id -> result
+                        | Cancel -> Some Cancelled
+                        | Timeout id -> Some (Timedout id)
                         | MachineEvent e -> predicate e
                     if result.IsNone then
                         let (newState, newCommand) = context.machine.update event context.state
