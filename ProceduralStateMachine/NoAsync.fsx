@@ -7,6 +7,15 @@ open System.Collections.Generic
 
 type C<'c> = | List of 'c list
 
+module Tuple =
+    let mapSnd f (a, b) = a, f b
+
+    let mapFst f (a, b) = f a, f
+
+    let map f1 f2 (a, b) = f1 a, f2 b
+
+    let add1 a b = a, b
+
 module Cmd =
     let map f (List l) = List (List.map f l)
 
@@ -22,11 +31,15 @@ type M<'s, 'e, 'c> = {
     }
 
 module Proc =
-    type TimerId = int
+    type ProcedureResult<'a> =
+        | Incomplete
+        | Canceled
+        | Completed of 'a
+
+    type ProcedureState<'s, 'a> = 's * ProcedureResult<'a>
 
     type ProcedureEvent<'e> =
-        | Cancel
-        | Timeout of TimerId
+        | Timeout
         | MachineEvent of 'e
 
     type ProcedureCommand<'c> =
@@ -35,34 +48,28 @@ module Proc =
         | MachineCommand of 'c
 
     type Context<'s, 'e, 'c> = {
-        nextTimerId: int
         machine: M<'s, 'e, 'c>
         state: 's
-        command: 'c
-        events: unit -> Async<ProcedureEvent<'e>>
-        processor: 'c -> unit
+        command: C<'c>
         }
 
-    type Result<'a> =
-        | Cancelled
-        | Exception of System.Exception
-        | Completed of 'a
-
-    type P<'s, 'e, 'c, 'a> = 
-        P of (Context<'s, 'e, 'c> -> Async<Context<'s, 'e, 'c> * Result<'a>>)
+    type P<'s, 'e, 'c, 'a> = P of (M<'s, 'e, 'c> -> M<ProcedureState<'s, 'a>, ProcedureEvent<'e>, ProcedureCommand<'c>>)
 
     let retn a =
-        let run c = async { return c, Completed a }
-        P run
+        let f m = { 
+            init = m.init |> Tuple.map (Tuple.add1 (Completed a)) (Cmd.map MachineCommand)
+            update = fun e s -> s, Cmd.none
+            }
+        P f
 
     let bind f (P p) =
-        let run c = 
+        let f m = 
             async {
                 let! cnew, a = p c
                 let (P p2) = f a
                 return! p2 cnew
                 }
-        P run
+        P f
 
     let waitForEvent predicate =
         let run context =
@@ -75,8 +82,7 @@ module Proc =
                     let! event = context.events ()
                     result <- 
                         match event with
-                        | Cancel -> result
-                        | Timeout id -> result
+                        | Timeout -> result
                         | MachineEvent e -> predicate e
                     if result.IsNone then
                         let (newState, newCommand) = context.machine.update event context.state
