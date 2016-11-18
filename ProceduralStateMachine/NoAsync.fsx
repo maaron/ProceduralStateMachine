@@ -8,6 +8,112 @@ open System
 
 fsi.ShowDeclarationValues <- false
 
+module Seq =
+    let takeUntil predicate (sequence: IEnumerable<'t>) =
+        seq {
+            use en = sequence.GetEnumerator()
+            let mutable stop = false
+            while not stop && en.MoveNext() do
+                yield en.Current
+                stop <- predicate en.Current
+        }
+
+module Proc =
+    type P<'s, 'a> =
+        | Waiting of ('s -> R<'s, 'a>)
+        | Ready of (unit -> R<'s, 'a>)
+
+    and R<'s, 'a> = 
+        | Done of 'a
+        | Next of P<'s, 'a>
+
+    type PBuilder() =
+        member x.Bind(p: P<'s, 'a>, f: 'a -> P<'s, 'a2>): P<'s, 'a2> =
+            match p with
+            | Ready cont -> 
+                let r = cont ()
+                match r with
+                | Done a -> f a
+                | Next pnext -> x.Bind(pnext, f)
+
+            | Waiting cont ->
+                let step state =
+                    let r = cont state
+                    match r with
+                    | Done a -> Next (f a)
+                    | Next pnext -> Next (x.Bind(pnext, f))
+                Waiting step
+
+        member x.Return(v) = Ready (fun _ -> Done v)
+
+    // Starts a procedure by returning the first result
+    let start p = 
+        match p with
+        | Ready cont -> cont ()
+        | Waiting cont -> Next p
+
+    // Steps a procedure along by returning the next result.  It is recursive, as internally it 
+    // actually steps until the procedure indicates it is waiting for the next input
+    let rec step (s: 's) (r: R<'s, 'a>): R<'s, 'a> =
+        match r with
+        | Done a -> Done a
+        | Next (Ready cont) -> step s (cont ())
+        | Next (Waiting cont) -> 
+            let rnext = cont s
+            match rnext with
+            | Next (Ready cont) -> step s (cont ())
+            | _ -> rnext
+
+    // Runs a procedure by stepping it for all the events in the sequence.  Note that the 
+    // procedure may not yet be complete when the function returns, as it may still be expecting 
+    // further events.  In the event that the procedure completes before all the events are 
+    // consumed, the function returns early.
+    let run events proc =
+        let init = start proc
+        
+        let next result event = step event result
+        
+        let isDone result = 
+            match result with
+            | Done _ -> true
+            | _ -> false
+
+        Seq.scan next init events
+        |> Seq.takeUntil isDone
+        |> Seq.last
+
+    // A procedure that just returns the current state
+    let getState = Waiting Done
+    
+    let proc = PBuilder()
+
+open Proc
+
+let p1 (v: 'v): P<string, 'v> = proc { return v }
+
+let wait = 
+    let f state = Done state
+    Waiting f
+
+let p2 = proc {
+    let! s = getState
+    let! a1 = p1 1
+    let! a2 = p1 2
+    let! a3 = p1 3
+    let! s2 = getState
+    return a1, a2, a3, s, s2
+    }
+
+start (p1 "a")
+start p2
+start p2 |> step "1"
+start p2 |> step "1" |> step "2"
+start p2 |> step "1" |> step "2" |> step "3"
+
+let events = [ "1"; "2"; "3" ]
+
+let result = run events p2
+
 // This is rather surprising (to me, at least), but the bool flag is needed here in order to know 
 // whether the Co is created with Bind or Return.  If created with Return, it implies we aren't 
 // waiting for further input.  It seems like this is redundant with the "Done/Next" cases in the 
