@@ -103,7 +103,7 @@ module Proc =
         context.processor context.command
         { context with command = Cmd.none }
 
-    let waitForEvent duration predicate =
+    let waitForEvent duration predicate: P<'state, 'event, 'command, 'result> =
         let run context =
             async {
                 let mutable ctx = contextStartTimer duration context
@@ -118,7 +118,7 @@ module Proc =
             }
         P run
 
-    let onEvent duration selectCont =
+    let onEvent duration selectCont: P<'state, 'event, 'command, 'result> =
         let run context =
             async {
                 let mutable ctx = contextStartTimer duration context
@@ -131,7 +131,7 @@ module Proc =
                     result <- newResult
                 return ctx, result.Value
             }
-        bind (fun p -> p) (P run)
+        bind id (P run)
 
     let runProc (P p) m events processor =
         let (s, c) = m.init
@@ -166,10 +166,17 @@ let machine = {
         printf "update called\n"
         s + 1, Cmd.one "command " }
 
-let p1 = Proc.bind (fun e1 -> Proc.retn e1) (Proc.waitForEvent (System.TimeSpan.FromSeconds 1.0) eventType1)
+let p1 = Proc.bind Proc.retn (Proc.waitForEvent (System.TimeSpan.FromSeconds 1.0) eventType1)
 
 let mutable events = [ 
     Proc.MachineEvent (Type1 123)
+    Proc.MachineEvent (Type2 "124")
+    Proc.MachineEvent (Type2 "124")
+    Proc.MachineEvent (Type2 "124")
+    Proc.MachineEvent (Type2 "124")
+    Proc.MachineEvent (Type2 "124")
+    Proc.MachineEvent (Type2 "124")
+    Proc.MachineEvent (Type2 "124")
     Proc.MachineEvent (Type2 "124")
     Proc.MachineEvent (Type1 456)
     Proc.Timeout 0
@@ -196,27 +203,19 @@ let p2 = proc {
     let! e1 = Proc.waitForEvent timeout eventType1
 
     let! e2 = onEventType2 timeout event2Handler
-    
+
     let! e3 = 
         Proc.onEvent timeout (function 
             | Type1 e1 -> Some (proc { return "Got a type1 event" })
-            | Type2 e2 -> Some (Proc.retn "Got a type2 event")
-            | _ -> Some (proc { return "test failed" }))
+            //| Type2 e2 -> Some (Proc.retn "Got a type2 event")
+            | _ -> None)
 
     return e1, e2, e3
     }
 
 let r2 = Proc.runProc p2 machine nextEvent processor
 
-let output = Async.RunSynchronously (r2, 100)
+let output = Async.RunSynchronously (r2, 1000)
 
 printf "result = %A\n" output
 
-let debug() =
-    printfn "Line: %s" __LINE__
-    printfn "Source Directory: %s" __SOURCE_DIRECTORY__
-    printfn "Source File: %s" __SOURCE_FILE__
-
-debug()
-
-debug()
