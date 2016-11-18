@@ -19,9 +19,9 @@ module Seq =
         }
 
 module Proc =
-    type P<'s, 'a> =
-        | Waiting of ('s -> R<'s, 'a>)
-        | Ready of 'a
+    type Wait = Waiting | Ready
+
+    type P<'s, 'a> = Wait * ('s -> R<'s, 'a>)
 
     and R<'s, 'a> = 
         | Done of 's * 'a
@@ -29,35 +29,41 @@ module Proc =
 
     type PBuilder() =
         member x.Bind(p: P<'s, 'a>, f: 'a -> P<'s, 'a2>): P<'s, 'a2> =
-            match p with
-            | Ready a -> f a
+            let (wait, cont) = p
+            let step state =
+                match cont state with
+                | Done (s, a) -> Next (s, f a)
+                | Next (s, pnext) -> Next (s, x.Bind(pnext, f))
+            (wait, step)
 
-            | Waiting cont ->
-                let step state =
-                    match cont state with
-                    | Done (s, a) -> Next (s, f a)
-                    | Next (s, pnext) -> Next (s, x.Bind(pnext, f))
-                Waiting step
-
-        member x.Return(v) = Ready v
+        member x.Return(v: 'a): P<'s, 'a> = 
+            (Ready, fun s -> Done (s, v))
 
         member x.ReturnFrom(p) = p
 
+    // This function recursively applies the current state until the procedure is either done 
+    // or waiting for the next state
+    let rec readyStep (r: R<'s, 'a>): R<'s, 'a> =
+        match r with
+        | Next (sold, (Ready, cont)) -> readyStep (cont sold)
+        | _ -> r
+    
     // Starts a procedure by returning the first result
     let start p s = 
-        match p with
-        | Ready a -> Done (s, a)
-        | Waiting cont -> Next (s, p)
+        let firstResult = 
+            match p with
+            | (Ready, cont) -> cont s
+            | (Waiting, cont) -> Next (s, p)
+        readyStep firstResult
 
     // Steps a procedure along by returning the next result.  It is recursive, as internally it 
     // actually steps until the procedure indicates it is waiting for the next input
-    let rec step (s: 's) (r: R<'s, 'a>): R<'s, 'a> =
+    let step (s: 's) (r: R<'s, 'a>): R<'s, 'a> =
+        
+        // Unless we're already done, get the next result and immediately process any "ready" 
+        // procedures
         match r with
-        | Next (_, Waiting cont) -> 
-            let rnext = cont s
-            match rnext with
-            | Next (s, Ready a) -> Done (s, a)
-            | _ -> rnext
+        | Next (_, (_, cont)) -> cont s |> readyStep 
         | _ -> r
 
     // Runs a procedure by stepping it for all the events in the sequence.  Note that the 
@@ -86,7 +92,8 @@ module Proc =
         |> Seq.tryLast
 
     // A procedure that just returns the current state
-    let getState = Waiting (fun s -> Done (s, s))
+    let getState: P<'s, 's> = 
+        (Ready, fun s -> Done (s, s))
 
     // A procedure that returns the state once the given predicate returns true
     let rec waitForState predicate =
@@ -94,19 +101,26 @@ module Proc =
             match predicate s with
             | true -> Done (s, s)
             | false -> Next (s, waitForState predicate)
-        Waiting f
+        (Waiting, f)
     
     let proc = PBuilder()
 
 open Proc
 
-let p1 (v: 'v) = 
-    proc { 
-        let! s = getState
-        return s, v 
-        }
+let p0 = proc { return 123 }
+
+let p1 (v: 'v) = proc { 
+    let! s = getState
+    return s, v 
+    }
 
 let p2 = proc {
+    let! s1 = p0
+    let! s2 = p0
+    return s1, s2
+    }
+
+let p3 = proc {
     let! s = getState
     let! a1, a2 = 
         proc {
@@ -120,17 +134,25 @@ let p2 = proc {
     return a1, a2, a3, s, s2, s3
     }
 
+start p0 "initial state"
+
 start (p1 "a") "1"
-start p2 "1"
-start p2 "1" |> step "2"
-start p2 "1" |> step "2" |> step "3"
-start p2 "1" |> step "2" |> step "3" |> step "4"
+
+start p2 "0"
+
+start p3 "0"
+start p3 "0" |> step "1"
+start p3 "0" |> step "1" |> step "2"
+start p3 "0" |> step "1" |> step "2" |> step "3"
+start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4"
+start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4" |> step "5"
+start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4" |> step "5" |> step "60"
 
 start (proc { return! getState }) "asdf" |> step "qwer"
 
-let events = 0 |> Seq.unfold (fun i -> Some (string i, i + 1))
+let events = seq { for i in 0 .. 20 do yield i.ToString() }
 
-let result = run events p2
+let result = run events p3
 
 // This is rather surprising (to me, at least), but the bool flag is needed here in order to know 
 // whether the Co is created with Bind or Return.  If created with Return, it implies we aren't 
