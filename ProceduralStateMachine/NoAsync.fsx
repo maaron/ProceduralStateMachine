@@ -34,8 +34,7 @@ module Proc =
 
             | Waiting cont ->
                 let step state =
-                    let r = cont state
-                    match r with
+                    match cont state with
                     | Done a -> Next (f a)
                     | Next pnext -> Next (x.Bind(pnext, f))
                 Waiting step
@@ -80,6 +79,14 @@ module Proc =
 
     // A procedure that just returns the current state
     let getState = Waiting Done
+
+    // A procedure that returns the state once the given predicate returns true
+    let rec waitForState predicate =
+        let f state = 
+            match predicate state with
+            | true -> Done state
+            | false -> Next (waitForState predicate)
+        Waiting f
     
     let proc = PBuilder()
 
@@ -95,9 +102,10 @@ let p2 = proc {
     let! s = getState
     let! a1 = p1 1
     let! a2 = p1 2
+    let! s2 = waitForState (fun (s: string) -> s.Length > 1)
     let! a3 = p1 3
-    let! s2 = getState
-    return a1, a2, a3, s, s2
+    let! s3 = getState
+    return a1, a2, a3, s, s2, s3
     }
 
 start (p1 "a")
