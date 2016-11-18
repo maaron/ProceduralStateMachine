@@ -24,8 +24,8 @@ module Proc =
         | Ready of 'a
 
     and R<'s, 'a> = 
-        | Done of 'a
-        | Next of P<'s, 'a>
+        | Done of 's * 'a
+        | Next of 's * P<'s, 'a>
 
     type PBuilder() =
         member x.Bind(p: P<'s, 'a>, f: 'a -> P<'s, 'a2>): P<'s, 'a2> =
@@ -35,84 +35,98 @@ module Proc =
             | Waiting cont ->
                 let step state =
                     match cont state with
-                    | Done a -> Next (f a)
-                    | Next pnext -> Next (x.Bind(pnext, f))
+                    | Done (s, a) -> Next (s, f a)
+                    | Next (s, pnext) -> Next (s, x.Bind(pnext, f))
                 Waiting step
 
         member x.Return(v) = Ready v
 
+        member x.ReturnFrom(p) = p
+
     // Starts a procedure by returning the first result
-    let start p = 
+    let start p s = 
         match p with
-        | Ready a -> Done a
-        | Waiting cont -> Next p
+        | Ready a -> Done (s, a)
+        | Waiting cont -> Next (s, p)
 
     // Steps a procedure along by returning the next result.  It is recursive, as internally it 
     // actually steps until the procedure indicates it is waiting for the next input
     let rec step (s: 's) (r: R<'s, 'a>): R<'s, 'a> =
         match r with
-        | Done a -> Done a
-        | Next (Ready a) -> Done a
-        | Next (Waiting cont) -> 
+        | Next (_, Waiting cont) -> 
             let rnext = cont s
             match rnext with
-            | Next (Ready a) -> Done a
+            | Next (s, Ready a) -> Done (s, a)
             | _ -> rnext
+        | _ -> r
 
     // Runs a procedure by stepping it for all the events in the sequence.  Note that the 
     // procedure may not yet be complete when the function returns, as it may still be expecting 
     // further events.  In the event that the procedure completes before all the events are 
-    // consumed, the function returns early.
+    // consumed, the function returns early.  The event sequence must be non-empty, or else the 
+    // function returns None.
     let run events proc =
-        let init = start proc
+        let init = None
         
-        let next result event = step event result
+        let next resultOpt event = 
+            let result =
+                match resultOpt with
+                | None -> Some (start proc event)
+                | Some r -> Some (step event r)
+            result
         
         let isDone result = 
             match result with
-            | Done _ -> true
+            | Some (Done _) -> true
             | _ -> false
 
         Seq.scan next init events
         |> Seq.takeUntil isDone
-        |> Seq.last
+        |> Seq.choose id
+        |> Seq.tryLast
 
     // A procedure that just returns the current state
-    let getState = Waiting Done
+    let getState = Waiting (fun s -> Done (s, s))
 
     // A procedure that returns the state once the given predicate returns true
     let rec waitForState predicate =
-        let f state = 
-            match predicate state with
-            | true -> Done state
-            | false -> Next (waitForState predicate)
+        let f s = 
+            match predicate s with
+            | true -> Done (s, s)
+            | false -> Next (s, waitForState predicate)
         Waiting f
     
     let proc = PBuilder()
 
 open Proc
 
-let p1 (v: 'v): P<string, 'v> = proc { return v }
-
-let wait = 
-    let f state = Done state
-    Waiting f
+let p1 (v: 'v) = 
+    proc { 
+        let! s = getState
+        return s, v 
+        }
 
 let p2 = proc {
     let! s = getState
-    let! a1 = p1 1
-    let! a2 = p1 2
+    let! a1, a2 = 
+        proc {
+            let! a1 = p1 1
+            let! a2 = p1 2
+            return a1, a2
+        }
     let! s2 = waitForState (fun (s: string) -> s.Length > 1)
     let! a3 = p1 3
     let! s3 = getState
     return a1, a2, a3, s, s2, s3
     }
 
-start (p1 "a")
-start p2
-start p2 |> step "1"
-start p2 |> step "1" |> step "2"
-start p2 |> step "1" |> step "2" |> step "3"
+start (p1 "a") "1"
+start p2 "1"
+start p2 "1" |> step "2"
+start p2 "1" |> step "2" |> step "3"
+start p2 "1" |> step "2" |> step "3" |> step "4"
+
+start (proc { return! getState }) "asdf" |> step "qwer"
 
 let events = 0 |> Seq.unfold (fun i -> Some (string i, i + 1))
 
