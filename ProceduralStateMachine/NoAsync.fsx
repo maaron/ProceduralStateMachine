@@ -95,13 +95,21 @@ module Proc =
     let getState: P<'s, 's> = 
         (Ready, fun s -> Done (s, s))
 
-    // A procedure that returns the state once the given predicate returns true
-    let rec waitForState predicate =
-        let f s = 
-            match predicate s with
-            | true -> Done (s, s)
-            | false -> Next (s, waitForState predicate)
-        (Waiting, f)
+    // A procedure that returns the state once the given predicate returns true.  If the current 
+    // state matches, it completes immediately without waiting for the next state.
+    let waitForState predicate =
+        let rec waitNextState =
+            let f s = 
+                match predicate s with
+                | true -> Done (s, s)
+                | false -> Next (s, waitNextState)
+            (Waiting, f)
+
+        let checkCurrentState s =
+            if predicate s then Done (s, s)
+            else Next (s, waitNextState)
+        
+        (Ready, checkCurrentState)
     
     let proc = PBuilder()
 
