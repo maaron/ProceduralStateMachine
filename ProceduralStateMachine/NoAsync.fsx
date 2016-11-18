@@ -21,7 +21,7 @@ module Seq =
 module Proc =
     type P<'s, 'a> =
         | Waiting of ('s -> R<'s, 'a>)
-        | Ready of (unit -> R<'s, 'a>)
+        | Ready of 'a
 
     and R<'s, 'a> = 
         | Done of 'a
@@ -30,11 +30,7 @@ module Proc =
     type PBuilder() =
         member x.Bind(p: P<'s, 'a>, f: 'a -> P<'s, 'a2>): P<'s, 'a2> =
             match p with
-            | Ready cont -> 
-                let r = cont ()
-                match r with
-                | Done a -> f a
-                | Next pnext -> x.Bind(pnext, f)
+            | Ready a -> f a
 
             | Waiting cont ->
                 let step state =
@@ -44,12 +40,12 @@ module Proc =
                     | Next pnext -> Next (x.Bind(pnext, f))
                 Waiting step
 
-        member x.Return(v) = Ready (fun _ -> Done v)
+        member x.Return(v) = Ready v
 
     // Starts a procedure by returning the first result
     let start p = 
         match p with
-        | Ready cont -> cont ()
+        | Ready a -> Done a
         | Waiting cont -> Next p
 
     // Steps a procedure along by returning the next result.  It is recursive, as internally it 
@@ -57,11 +53,11 @@ module Proc =
     let rec step (s: 's) (r: R<'s, 'a>): R<'s, 'a> =
         match r with
         | Done a -> Done a
-        | Next (Ready cont) -> step s (cont ())
+        | Next (Ready a) -> Done a
         | Next (Waiting cont) -> 
             let rnext = cont s
             match rnext with
-            | Next (Ready cont) -> step s (cont ())
+            | Next (Ready a) -> Done a
             | _ -> rnext
 
     // Runs a procedure by stepping it for all the events in the sequence.  Note that the 
@@ -110,7 +106,7 @@ start p2 |> step "1"
 start p2 |> step "1" |> step "2"
 start p2 |> step "1" |> step "2" |> step "3"
 
-let events = [ "1"; "2"; "3" ]
+let events = 0 |> Seq.unfold (fun i -> Some (string i, i + 1))
 
 let result = run events p2
 
