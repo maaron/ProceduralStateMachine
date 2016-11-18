@@ -213,9 +213,9 @@ let p2 = proc {
     return e1, e2, e3
     }
 
-let r2 = Proc.runProc p2 machine nextEvent processor
+//let r2 = Proc.runProc p2 machine nextEvent processor
 
-let output = Async.RunSynchronously (r2, 1000)
+//let output = Async.RunSynchronously (r2, 1000)
 
-printf "result = %A\n" output
+//printf "result = %A\n" output
 
