@@ -95,6 +95,10 @@ module Proc =
     let getState: P<'s, 's> = 
         (Ready, fun s -> Done (s, s))
 
+    // A procedure that waits for and returns the next state
+    let getNextState: P<'s, 's> =
+        (Waiting, fun s -> Done (s, s))
+
     // A procedure that waits for the next state that matches the predicate.  It does *not* 
     // consider the current state, and always waits for the next one.
     let rec waitForNextState predicate =
@@ -160,7 +164,7 @@ let p3 = proc {
         }
     let! s2 = waitForState (fun (s: string) -> s.Length > 1)
     let! a3 = p1 3
-    let! s3 = getState
+    let! s3 = getNextState
     return a1, a2, a3, s, s2, s3
     }
 
@@ -176,7 +180,7 @@ start p3 "0" |> step "1" |> step "2"
 start p3 "0" |> step "1" |> step "2" |> step "3"
 start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4"
 start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4" |> step "5"
-start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4" |> step "5" |> step "60"
+start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4" |> step "50" |> step "60"
 
 start (proc { return! getState }) "asdf" |> step "qwer"
 
@@ -209,8 +213,7 @@ type M<'s, 'e, 'c> = {
 type TimerId = int
 
 type ProcedureEvent<'e> =
-    | Cancel
-    | Timeout of TimerId
+    | TimerExpired of TimerId
     | MachineEvent of 'e
 
 type ProcedureCommand<'c> =
@@ -224,42 +227,22 @@ type TestState<'s, 'e, 'c> = {
     command: C<ProcedureCommand<'c>>
     machine: M<'s, 'e, 'c>
     nextTimerId: TimerId
-    waitTimer: TimerId
     }
 
 type TestProc<'s, 'e, 'c, 'r> = Proc.P<TestState<'s, 'e, 'c>, 'r>
 
-let updateContext predicate context procEvent =
-    match procEvent with
-    | Cancel -> context, Some Cancelled
-    | Timeout id -> 
-        context, 
-        // Ignore timer expirations for procedures that have already completed
-        if id = context.waitTimer then Some (Timedout id) 
-        else None
-    | MachineEvent e -> 
-        match predicate e with
-        | None -> 
-            let (newState, newCommand) = context.machine.update e context.state
-            { context with state = newState; command = Cmd.map MachineCommand newCommand }, None
-        | Some a -> context, Some (Completed a)
-
-let contextStartTimer duration context =
-    { context with 
-        nextTimerId = context.nextTimerId + 1
-        command = Cmd.add (ProcedureCommand.StartTimer (context.nextTimerId, duration)) context.command }
-
-let contextProcessCommand context =
-    context.processor context.command
-    { context with command = Cmd.none }
-
-let startWaitTimer duration = proc {
-    let! s = setState (fun s -> 
-        { s with 
+let startWaitTimer duration = 
+    printf "startWaitTimer\n"
+    let update state =
+        { state with 
+            nextTimerId = state.nextTimerId + 1
             command = 
-                Cmd.add (StartTimer duration) s.command 
-        })
-    return s
+                Cmd.add (StartTimer (state.nextTimerId, duration)) state.command 
+        }
+
+    proc {
+        let! state = Proc.setState update
+        return state.nextTimerId
     }
 
 let defaultUpdate event testState =
@@ -269,37 +252,87 @@ let defaultUpdate event testState =
         command = Cmd.batch [(Cmd.map MachineCommand newCmd); testState.command]
     }
 
-let waitForEvent duration predicate: TestProc<'state, 'event, 'command, 'event option> =
-    proc {
-        let! timerId = startWaitTimer duration
-        let! s = Proc.onNextState (fun s -> 
-            match s.event with
-            | Timeout timerId -> proc { return None } |> Some
-            | MachineEvent e ->
-                if predicate e then proc { return Some e } |> Some
-                else proc {
-                    let! s1 = Proc.setState (defaultUpdate e)
-                    return None 
-                } |> Some
-            | _ -> None)
 
-        return s
+
+let tryWaitForEvent duration predicate: TestProc<'state, 'event, 'command, 'result option> =
+    let rec processEvent predicate timerId = 
+        proc {
+            let! state = Proc.getNextState
+
+            match state.event with
+            | TimerExpired id when id = timerId -> 
+                return None
+
+            // Predicate matches, give event to proc
+            | MachineEvent e ->
+                match predicate e with
+                | Some r -> return Some r
+                | None -> 
+                    let! s1 = Proc.setState (defaultUpdate e)
+                    return! processEvent predicate timerId
+
+            // Non-matching timer- keep waiting
+            | _ -> return! processEvent predicate timerId
+        }
+
+    proc {
+        printf "starting timer\n"
+        let! timerId = startWaitTimer duration
+        printf "timer started %A\n" timerId
+        return! processEvent predicate timerId
     }
 
-let onEvent duration selectCont: P<'state, 'event, 'command, 'result> =
-    let run context =
-        async {
-            let mutable ctx = contextStartTimer duration context
-            let mutable result = None
-            while result.IsNone do
-                ctx <- contextProcessCommand ctx
-                let! event = context.events ()
-                let (newCtx, newResult) = updateContext selectCont ctx event
-                ctx <- newCtx
-                result <- newResult
-            return ctx, result.Value
+let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
+    let rec processEvent selectCont timerId = 
+        proc {
+            let! state = Proc.getNextState
+
+            match state.event with
+            | TimerExpired id when id = timerId -> 
+                return None
+
+            // Predicate matches, give event to proc
+            | MachineEvent e ->
+                match selectCont e with
+                | Some pnext -> 
+                    let! result = pnext
+                    return Some result
+                | None -> return! processEvent selectCont timerId
+
+            // Non-matching timer- keep waiting
+            | _ -> return! processEvent selectCont timerId
         }
-    bind id (P run)
+
+    proc {
+        let! timerId = startWaitTimer duration
+        return! processEvent selectCont timerId
+    }
+
+let startTc machine tc =
+    let procState =
+        { 
+            state = fst machine.init
+            event = MachineEvent (Type1 123)
+            command = Cmd.map MachineCommand (snd machine.init)
+            machine = machine
+            nextTimerId = 0
+        }
+    start tc procState
+
+let processResult result =
+    match result with
+    | Done (s, a) ->
+        printf "test completed with %A\n" a
+        Done (s, a)
+
+    | Next (s, pnext) ->
+        printf "processing commands %A\n" s.command
+        Next ({ s with command = Cmd.none }, pnext)
+
+let stepTc event result =
+    match result with
+    | Done (s, a) -> Done ({ s with event = event }, a)
+    | Next (s, pnext) -> Proc.step { s with event = event } result
 
 type Command = string
 
@@ -309,49 +342,32 @@ let eventType1 event =
 let machine = {
     init = 0, Cmd.one "initialize"
     update = fun (e: Event) s -> 
-        printf "update called\n"
-        s + 1, Cmd.one "command " }
+        s + 1, Cmd.one "command "
+    }
 
-let p1 = Proc.bind Proc.retn (Proc.waitForEvent (System.TimeSpan.FromSeconds 1.0) eventType1)
+let tc1 = proc {
+    let! event = tryWaitForEvent (System.TimeSpan.FromSeconds 1.0) eventType1
+    return event
+    }
 
-let mutable events = [ 
-    Proc.MachineEvent (Type1 123)
-    Proc.MachineEvent (Type2 "124")
-    Proc.MachineEvent (Type2 "124")
-    Proc.MachineEvent (Type2 "124")
-    Proc.MachineEvent (Type2 "124")
-    Proc.MachineEvent (Type2 "124")
-    Proc.MachineEvent (Type2 "124")
-    Proc.MachineEvent (Type2 "124")
-    Proc.MachineEvent (Type2 "124")
-    Proc.MachineEvent (Type1 456)
-    Proc.Timeout 0
-]
-
-let nextEvent () = async { 
-    let r = events.Head
-    events <- events.Tail
-    return r
-}
-
-let processor c = printf "processing command: %A\n" c
-
-let r1 = Proc.runProc p1 machine nextEvent processor
+startTc machine tc1 |> processResult 
+|> stepTc (MachineEvent (Type2 "123")) |> processResult 
+|> stepTc (MachineEvent (Type1 2345)) |> processResult
 
 let onEventType2 timeout proc =
-    Proc.onEvent timeout (function | Type2 v -> Some (proc v) | _ -> None)
+    tryOnEvent timeout (function | Type2 v -> Some (proc v) | _ -> None)
 
 let event2Handler (event: string) = proc { return event.Length }
 
-let p2 = proc {
+let tc2 = proc {
     let timeout = TimeSpan.FromSeconds 1.0
 
-    let! e1 = Proc.waitForEvent timeout eventType1
+    let! e1 = tryWaitForEvent timeout eventType1
 
     let! e2 = onEventType2 timeout event2Handler
 
     let! e3 = 
-        Proc.onEvent timeout (function 
+        tryOnEvent timeout (function 
             | Type1 e1 -> Some (proc { return "Got a type1 event" })
             //| Type2 e2 -> Some (Proc.retn "Got a type2 event")
             | _ -> None)
@@ -359,9 +375,12 @@ let p2 = proc {
     return e1, e2, e3
     }
 
-let r2 = Proc.runProc p2 machine nextEvent processor
-
-let output = Async.RunSynchronously (r2, 1000)
-
-printf "result = %A\n" output
+start tc2 
+    { 
+        state = fst machine.init
+        event = MachineEvent (Type1 123)
+        command = Cmd.none
+        machine = machine
+        nextTimerId = 0
+    }
 
