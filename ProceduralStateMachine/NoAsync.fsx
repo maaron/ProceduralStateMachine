@@ -368,19 +368,15 @@ let tc2 = proc {
 
     let! e3 = 
         tryOnEvent timeout (function 
-            | Type1 e1 -> Some (proc { return "Got a type1 event" })
-            //| Type2 e2 -> Some (Proc.retn "Got a type2 event")
+            | Type1 e1 -> Some <| proc { return sprintf "Got a type1 event %A" e1 }
+            | Type2 e2 -> Some <| proc { return sprintf "Got a type2 event %A" e2 }
             | _ -> None)
 
     return e1, e2, e3
     }
 
-start tc2 
-    { 
-        state = fst machine.init
-        event = MachineEvent (Type1 123)
-        command = Cmd.none
-        machine = machine
-        nextTimerId = 0
-    }
+startTc machine tc2 |> processResult 
+|> stepTc (MachineEvent (Type1 2345)) |> processResult
+|> stepTc (MachineEvent (Type2 "12345")) |> processResult 
+|> stepTc (MachineEvent (Type2 "123 #2")) |> processResult 
 
