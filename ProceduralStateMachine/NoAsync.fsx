@@ -39,6 +39,10 @@ module Proc =
 
     let returnProc v = P (Ready, fun s -> Done (s, v))
 
+    let map f = bind (fun s -> f s |> returnProc)
+
+    let (<!>) p f = map f p
+
     type PBuilder() =
         member x.Bind(p: P<'s, 'a>, f: 'a -> P<'s, 'a2>): P<'s, 'a2> = bind f p
 
@@ -168,18 +172,10 @@ module Cmd =
 
     let batch cmds = List [ for (List l) in cmds do for c in l do yield c ]
 
-type Event =
-    | Type1 of int
-    | Type2 of string
-
-type M<'s, 'e, 'c> = {
-    init: 's * C<'c>
-    update: 'e -> 's -> 's * C<'c>
-}
-
 type TimerId = int
 
 type ProcedureEvent<'e> =
+    | Start
     | TimerExpired of TimerId
     | MachineEvent of 'e
 
@@ -187,6 +183,11 @@ type ProcedureCommand<'c> =
     | StartTimer of TimerId * System.TimeSpan
     | Automation of string * ((string * string) list)
     | MachineCommand of 'c
+
+type M<'s, 'e, 'c> = {
+    init: 's * C<'c>
+    update: 'e -> 's -> 's * C<'c>
+}
 
 type TestState<'s, 'e, 'c> = {
     state: 's
@@ -275,11 +276,15 @@ let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result o
         return! processEvent selectCont timerId
     }
 
+type Event =
+    | Type1 of int
+    | Type2 of string
+
 let startTc machine tc =
     let procState =
         { 
             state = fst machine.init
-            event = MachineEvent (Type1 123)
+            event = Start
             command = Cmd.map MachineCommand (snd machine.init)
             machine = machine
             nextTimerId = 0
@@ -326,10 +331,17 @@ let onEventType2 timeout proc =
 
 let event2Handler (event: string) = proc { return event.Length }
 
+let fireCommand cmd = proc { 
+    let! _ = setState (fun s -> { s with command = Cmd.add (MachineCommand cmd) s.command })
+    return ()
+    }
+
 let tc2 = proc {
     let timeout = TimeSpan.FromSeconds 1.0
 
     let! e1 = tryWaitForEvent timeout eventType1
+
+    do! fireCommand <| e1.ToString()
 
     let! e2 = onEventType2 timeout event2Handler
 
@@ -339,10 +351,25 @@ let tc2 = proc {
             | Type2 e2 -> Some <| proc { return sprintf "Got a type2 event %A" e2 }
             | _ -> None)
 
-    return e1, e2, e3
+    do! fireCommand "do something"
+
+    let! eventOrTimeout = 
+        tryWaitForEvent timeout eventType1 >>= function 
+            | Some e4 -> returnProc "event" 
+            | None -> returnProc "timeout"
+
+    let! eventOrTimeout2 = 
+        tryWaitForEvent timeout eventType1 
+        <!> function 
+            | Some e4 -> "event" 
+            | None -> "timeout"
+
+    return e1, e2, e3, eventOrTimeout, eventOrTimeout2
     }
 
 startTc machine tc2 |> processResult 
 |> stepTc (MachineEvent (Type1 2345)) |> processResult
 |> stepTc (MachineEvent (Type2 "12345")) |> processResult 
 |> stepTc (MachineEvent (Type2 "123 #2")) |> processResult 
+|> stepTc (TimerExpired 4) |> processResult 
+|> stepTc (MachineEvent (Type1 111)) |> processResult
