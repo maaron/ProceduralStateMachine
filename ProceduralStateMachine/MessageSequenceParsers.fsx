@@ -12,7 +12,7 @@ type Severity = Error | Warning | Success
 type Detail<'e> =
     | Empty
     | And of Detail<'e> list
-    | Or of Detail<'e> option * Detail<'e> list
+    | Or of Detail<'e> list
     | List of Detail<'e> list
     | Summary of Severity * string * 'e * Detail<'e>
 
