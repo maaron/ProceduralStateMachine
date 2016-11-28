@@ -302,6 +302,7 @@ let processResult result =
         Next ({ s with command = Cmd.none }, pnext)
 
 let stepTc event result =
+    printf "event: %A\n" event
     match result with
     | Done (s, a) -> Done ({ s with event = event }, a)
     | Next (s, pnext) -> Proc.step { s with event = event } result
@@ -341,7 +342,7 @@ let tc2 = proc {
 
     let! e1 = tryWaitForEvent timeout eventType1
 
-    do! fireCommand <| e1.ToString()
+    do! fireCommand <| string e1
 
     let! e2 = onEventType2 timeout event2Handler
 
@@ -355,13 +356,12 @@ let tc2 = proc {
 
     let! eventOrTimeout = 
         tryWaitForEvent timeout eventType1 >>= function 
-            | Some e4 -> returnProc "event" 
+            | Some e4 -> returnProc (sprintf "event %A" e4)
             | None -> returnProc "timeout"
 
     let! eventOrTimeout2 = 
-        tryWaitForEvent timeout eventType1 
-        <!> function 
-            | Some e4 -> "event" 
+        tryWaitForEvent timeout eventType1 <!> function 
+            | Some e4 -> sprintf "event %A" e4
             | None -> "timeout"
 
     return e1, e2, e3, eventOrTimeout, eventOrTimeout2
