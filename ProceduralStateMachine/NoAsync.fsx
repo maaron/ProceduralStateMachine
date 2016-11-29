@@ -219,34 +219,6 @@ let defaultUpdate event testState =
         command = Cmd.batch [(Cmd.map MachineCommand newCmd); testState.command]
     }
 
-let tryWaitForEvent duration predicate: TestProc<'state, 'event, 'command, 'result option> =
-    let rec processEvent predicate timerId = 
-        proc {
-            let! state = Proc.getNextState
-
-            match state.event with
-            | TimerExpired id when id = timerId -> 
-                return None
-
-            | MachineEvent e ->
-                match predicate e with
-                | Some r -> 
-                    // Predicate matches, give event to proc
-                    return Some r
-                | None -> 
-                    // Predicate doesn't match, use default update
-                    let! s1 = Proc.setState (defaultUpdate e)
-                    return! processEvent predicate timerId
-
-            // Non-matching timer- keep waiting
-            | _ -> return! processEvent predicate timerId
-        }
-
-    proc {
-        let! timerId = startWaitTimer duration
-        return! processEvent predicate timerId
-    }
-
 let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
     let rec processEvent selectCont timerId = 
         proc {
@@ -275,6 +247,9 @@ let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result o
         let! timerId = startWaitTimer duration
         return! processEvent selectCont timerId
     }
+
+let tryWaitForEvent duration predicate =
+    tryOnEvent duration (predicate >> Option.map Proc.returnProc)
 
 let tryWaitForState duration predicate: TestProc<'state, 'event, 'command, 'result option> =
     let rec processEvent predicate timerId = 
