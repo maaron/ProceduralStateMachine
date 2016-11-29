@@ -276,6 +276,34 @@ let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result o
         return! processEvent selectCont timerId
     }
 
+let tryWaitForState duration predicate: TestProc<'state, 'event, 'command, 'result option> =
+    let rec processEvent predicate timerId = 
+        proc {
+            let! state = Proc.getNextState
+
+            match state.event with
+            | TimerExpired id when id = timerId -> 
+                return None
+
+            | MachineEvent e ->
+                let! newState = Proc.setState (defaultUpdate e)
+                match predicate newState.state with
+                | Some r -> 
+                    // Predicate matches, give event to proc
+                    return Some r
+                | None -> 
+                    // Predicate doesn't match, keep waiting
+                    return! processEvent predicate timerId
+
+            // Non-matching timer- keep waiting
+            | _ -> return! processEvent predicate timerId
+        }
+
+    proc {
+        let! timerId = startWaitTimer duration
+        return! processEvent predicate timerId
+    }
+
 type Event =
     | Type1 of int
     | Type2 of string
@@ -310,7 +338,9 @@ let stepTc event result =
 type Command = string
 
 let eventType1 event =
-    match event with | Type1 i -> Some i | _ -> None
+    match event with 
+    | Type1 i -> Some i 
+    | _ -> None
 
 let machine = {
     init = 0, Cmd.one "initialize"
