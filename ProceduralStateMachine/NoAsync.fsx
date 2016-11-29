@@ -251,7 +251,7 @@ let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result o
 let tryWaitForEvent duration predicate =
     tryOnEvent duration (predicate >> Option.map Proc.returnProc)
 
-let tryWaitForState duration predicate: TestProc<'state, 'event, 'command, 'result option> =
+let tryOnState duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
     let rec processEvent predicate timerId = 
         proc {
             let! state = Proc.getNextState
@@ -262,10 +262,11 @@ let tryWaitForState duration predicate: TestProc<'state, 'event, 'command, 'resu
 
             | MachineEvent e ->
                 let! newState = Proc.setState (defaultUpdate e)
-                match predicate newState.state with
-                | Some r -> 
+                match selectCont newState.state with
+                | Some cont -> 
                     // Predicate matches, give event to proc
-                    return Some r
+                    let! result = cont
+                    return Some result
                 | None -> 
                     // Predicate doesn't match, keep waiting
                     return! processEvent predicate timerId
@@ -276,8 +277,11 @@ let tryWaitForState duration predicate: TestProc<'state, 'event, 'command, 'resu
 
     proc {
         let! timerId = startWaitTimer duration
-        return! processEvent predicate timerId
+        return! processEvent selectCont timerId
     }
+
+let tryWaitForState duration predicate =
+    tryOnState duration (predicate >> Option.map Proc.returnProc)
 
 type Event =
     | Type1 of int
