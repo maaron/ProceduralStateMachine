@@ -181,6 +181,7 @@ type ProcedureEvent<'e> =
 
 type ProcedureCommand<'c> =
     | StartTimer of TimerId * System.TimeSpan
+    | StopTimer of TimerId
     | Automation of string * ((string * string) list)
     | MachineCommand of 'c
 
@@ -210,6 +211,18 @@ let startWaitTimer duration =
     proc {
         let! state = Proc.setState update
         return state.nextTimerId
+    }
+
+let stopWaitTimer timerId = 
+    let update state =
+        { state with 
+            command = 
+                Cmd.add (StopTimer timerId) state.command 
+        }
+
+    proc {
+        let! state = Proc.setState update
+        return ()
     }
 
 let defaultUpdate event testState =
@@ -246,7 +259,16 @@ let handleEventsWithTimeout duration handler =
 
     proc {
         let! timerId = startWaitTimer duration
-        return! tryHandleEvent timerId handler
+        let! result = tryHandleEvent timerId handler
+
+        match result with
+        | Some value -> 
+            // If we didn't timeout, send a command to stop the timer
+            do! stopWaitTimer timerId
+            return result
+        
+        | _ -> 
+            return result
     }
 
 let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
