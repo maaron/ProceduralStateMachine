@@ -219,8 +219,8 @@ let defaultUpdate event testState =
         command = Cmd.batch [(Cmd.map MachineCommand newCmd); testState.command]
     }
 
-let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
-    let rec processEvent selectCont timerId = 
+let handleEventsWithTimeout duration handler =
+    let rec tryHandleEvent timerId handler =
         proc {
             let! state = Proc.getNextState
 
@@ -228,57 +228,63 @@ let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result o
             | TimerExpired id when id = timerId -> 
                 return None
 
-            | MachineEvent e ->
-                match selectCont e with
-                | Some pnext -> 
-                    // Predicate matches, run next procedure
-                    let! result = pnext
-                    return Some result
+            | MachineEvent e -> 
+                // Give the event to the handler, who'll tell us whether to keep waiting or not
+                let! o = handler e
+                match o with
+                | Some r -> 
+                    // Got a result, stop waiting and return it
+                    return Some r
+
                 | None -> 
-                    // Predicate doesn't match, apply default update
-                    let! s1 = Proc.setState (defaultUpdate e)
-                    return! processEvent selectCont timerId
+                    // No result, keep waiting
+                    return! tryHandleEvent timerId handler
 
             // Non-matching timer- keep waiting
-            | _ -> return! processEvent selectCont timerId
+            | _ -> return! tryHandleEvent timerId handler
         }
 
     proc {
         let! timerId = startWaitTimer duration
-        return! processEvent selectCont timerId
+        return! tryHandleEvent timerId handler
     }
+
+let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
+    let handler e = proc {
+        match selectCont e with
+        | Some pnext -> 
+            // Predicate matches, run next procedure
+            let! result = pnext
+            return Some result
+
+        | None -> 
+            // Predicate doesn't match, apply default update and keep waiting
+            let! s1 = Proc.setState (defaultUpdate e)
+            return None
+    }
+
+    handleEventsWithTimeout duration handler
 
 let tryWaitForEvent duration predicate =
     tryOnEvent duration (predicate >> Option.map Proc.returnProc)
 
 let tryOnState duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
-    let rec processEvent predicate timerId = 
-        proc {
-            let! state = Proc.getNextState
+    let handler e = proc {
+        // Apply default update
+        let! newState = Proc.setState (defaultUpdate e)
+            
+        match selectCont newState.state with
+        | Some cont -> 
+            // Predicate matches, return result to caller
+            let! result = cont
+            return Some result
 
-            match state.event with
-            | TimerExpired id when id = timerId -> 
-                return None
-
-            | MachineEvent e ->
-                let! newState = Proc.setState (defaultUpdate e)
-                match selectCont newState.state with
-                | Some cont -> 
-                    // Predicate matches, give event to proc
-                    let! result = cont
-                    return Some result
-                | None -> 
-                    // Predicate doesn't match, keep waiting
-                    return! processEvent predicate timerId
-
-            // Non-matching timer- keep waiting
-            | _ -> return! processEvent predicate timerId
-        }
-
-    proc {
-        let! timerId = startWaitTimer duration
-        return! processEvent selectCont timerId
+        | None -> 
+            // Predicate doesn't match, keep waiting
+            return None
     }
+
+    handleEventsWithTimeout duration handler
 
 let tryWaitForState duration predicate =
     tryOnState duration (predicate >> Option.map Proc.returnProc)
