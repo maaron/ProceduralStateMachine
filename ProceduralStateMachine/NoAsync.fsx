@@ -181,6 +181,7 @@ type ProcedureEvent<'e> =
 
 type ProcedureCommand<'c> =
     | StartTimer of TimerId * System.TimeSpan
+    | StopTimer of TimerId
     | Automation of string * ((string * string) list)
     | MachineCommand of 'c
 
@@ -212,6 +213,18 @@ let startWaitTimer duration =
         return state.nextTimerId
     }
 
+let stopWaitTimer timerId = 
+    let update state =
+        { state with 
+            command = 
+                Cmd.add (StopTimer timerId) state.command 
+        }
+
+    proc {
+        let! state = Proc.setState update
+        return ()
+    }
+
 let defaultUpdate event testState =
     let (newState, newCmd) = testState.machine.update event testState.state
     { testState with
@@ -219,8 +232,8 @@ let defaultUpdate event testState =
         command = Cmd.batch [(Cmd.map MachineCommand newCmd); testState.command]
     }
 
-let tryWaitForEvent duration predicate: TestProc<'state, 'event, 'command, 'result option> =
-    let rec processEvent predicate timerId = 
+let handleEventsWithTimeout duration handler =
+    let rec tryHandleEvent timerId handler =
         proc {
             let! state = Proc.getNextState
 
@@ -228,53 +241,75 @@ let tryWaitForEvent duration predicate: TestProc<'state, 'event, 'command, 'resu
             | TimerExpired id when id = timerId -> 
                 return None
 
-            | MachineEvent e ->
-                match predicate e with
+            | MachineEvent e -> 
+                // Give the event to the handler, who'll tell us whether to keep waiting or not
+                let! o = handler e
+                match o with
                 | Some r -> 
-                    // Predicate matches, give event to proc
+                    // Got a result, stop waiting and return it
                     return Some r
+
                 | None -> 
-                    // Predicate doesn't match, use default update
-                    let! s1 = Proc.setState (defaultUpdate e)
-                    return! processEvent predicate timerId
+                    // No result, keep waiting
+                    return! tryHandleEvent timerId handler
 
             // Non-matching timer- keep waiting
-            | _ -> return! processEvent predicate timerId
+            | _ -> return! tryHandleEvent timerId handler
         }
 
     proc {
         let! timerId = startWaitTimer duration
-        return! processEvent predicate timerId
+        let! result = tryHandleEvent timerId handler
+
+        match result with
+        | Some value -> 
+            // If we didn't timeout, send a command to stop the timer
+            do! stopWaitTimer timerId
+            return result
+        
+        | _ -> 
+            return result
     }
 
 let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
-    let rec processEvent selectCont timerId = 
-        proc {
-            let! state = Proc.getNextState
+    let handler e = proc {
+        match selectCont e with
+        | Some pnext -> 
+            // Predicate matches, run next procedure
+            let! result = pnext
+            return Some result
 
-            match state.event with
-            | TimerExpired id when id = timerId -> 
-                return None
-
-            | MachineEvent e ->
-                match selectCont e with
-                | Some pnext -> 
-                    // Predicate matches, run next procedure
-                    let! result = pnext
-                    return Some result
-                | None -> 
-                    // Predicate doesn't match, apply default update
-                    let! s1 = Proc.setState (defaultUpdate e)
-                    return! processEvent selectCont timerId
-
-            // Non-matching timer- keep waiting
-            | _ -> return! processEvent selectCont timerId
-        }
-
-    proc {
-        let! timerId = startWaitTimer duration
-        return! processEvent selectCont timerId
+        | None -> 
+            // Predicate doesn't match, apply default update and keep waiting
+            let! s1 = Proc.setState (defaultUpdate e)
+            return None
     }
+
+    handleEventsWithTimeout duration handler
+
+let tryWaitForEvent duration predicate =
+    tryOnEvent duration (predicate >> Option.map Proc.returnProc)
+
+let tryOnState duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
+    let handler e = proc {
+        // Apply default update
+        let! newState = Proc.setState (defaultUpdate e)
+            
+        match selectCont newState.state with
+        | Some cont -> 
+            // Predicate matches, return result to caller
+            let! result = cont
+            return Some result
+
+        | None -> 
+            // Predicate doesn't match, keep waiting
+            return None
+    }
+
+    handleEventsWithTimeout duration handler
+
+let tryWaitForState duration predicate =
+    tryOnState duration (predicate >> Option.map Proc.returnProc)
 
 type Event =
     | Type1 of int
@@ -302,6 +337,7 @@ let processResult result =
         Next ({ s with command = Cmd.none }, pnext)
 
 let stepTc event result =
+    printf "event: %A\n" event
     match result with
     | Done (s, a) -> Done ({ s with event = event }, a)
     | Next (s, pnext) -> Proc.step { s with event = event } result
@@ -309,7 +345,9 @@ let stepTc event result =
 type Command = string
 
 let eventType1 event =
-    match event with | Type1 i -> Some i | _ -> None
+    match event with 
+    | Type1 i -> Some i 
+    | _ -> None
 
 let machine = {
     init = 0, Cmd.one "initialize"
@@ -341,7 +379,7 @@ let tc2 = proc {
 
     let! e1 = tryWaitForEvent timeout eventType1
 
-    do! fireCommand <| e1.ToString()
+    do! fireCommand <| string e1
 
     let! e2 = onEventType2 timeout event2Handler
 
@@ -355,13 +393,12 @@ let tc2 = proc {
 
     let! eventOrTimeout = 
         tryWaitForEvent timeout eventType1 >>= function 
-            | Some e4 -> returnProc "event" 
+            | Some e4 -> returnProc (sprintf "event %A" e4)
             | None -> returnProc "timeout"
 
     let! eventOrTimeout2 = 
-        tryWaitForEvent timeout eventType1 
-        <!> function 
-            | Some e4 -> "event" 
+        tryWaitForEvent timeout eventType1 <!> function 
+            | Some e4 -> sprintf "event %A" e4
             | None -> "timeout"
 
     return e1, e2, e3, eventOrTimeout, eventOrTimeout2
