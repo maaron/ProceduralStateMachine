@@ -48,6 +48,7 @@
     <None Include="Script.fsx" />
     <None Include="NoAsync.fsx" />
     <None Include="MessageSequenceParsers.fsx" />
+    <None Include="ImperativeBuilder.fsx" />
   </ItemGroup>
   <PropertyGroup>
     <MinimumVisualStudioVersion Condition="'$(MinimumVisualStudioVersion)' == ''">11</MinimumVisualStudioVersion>

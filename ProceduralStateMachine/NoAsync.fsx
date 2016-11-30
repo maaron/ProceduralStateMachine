@@ -37,16 +37,16 @@ module Proc =
 
     let (>>=) p f = bind f p
 
-    let returnProc v = P (Ready, fun s -> Done (s, v))
+    let retn v = P (Ready, fun s -> Done (s, v))
 
-    let map f = bind (fun s -> f s |> returnProc)
+    let map f = bind (fun s -> f s |> retn)
 
     let (<!>) p f = map f p
 
     type PBuilder() =
         member x.Bind(p: P<'s, 'a>, f: 'a -> P<'s, 'a2>): P<'s, 'a2> = bind f p
 
-        member x.Return(v: 'a): P<'s, 'a> = returnProc v
+        member x.Return(v: 'a): P<'s, 'a> = retn v
 
         member x.ReturnFrom(p) = p
 
@@ -190,7 +190,7 @@ type M<'s, 'e, 'c> = {
     update: 'e -> 's -> 's * C<'c>
 }
 
-type TestState<'s, 'e, 'c> = {
+type ProcState<'s, 'e, 'c> = {
     state: 's
     event: ProcedureEvent<'e>
     command: C<ProcedureCommand<'c>>
@@ -198,7 +198,7 @@ type TestState<'s, 'e, 'c> = {
     nextTimerId: TimerId
     }
 
-type TestProc<'s, 'e, 'c, 'r> = Proc.P<TestState<'s, 'e, 'c>, 'r>
+type SmProc<'s, 'e, 'c, 'r> = Proc.P<ProcState<'s, 'e, 'c>, 'r>
 
 let startWaitTimer duration = 
     let update state =
@@ -239,12 +239,13 @@ let handleEventsWithTimeout duration handler =
 
             match state.event with
             | TimerExpired id when id = timerId -> 
+                // Timer expired, stop waiting
                 return None
 
             | MachineEvent e -> 
                 // Give the event to the handler, who'll tell us whether to keep waiting or not
-                let! o = handler e
-                match o with
+                let! handlerResult = handler e
+                match handlerResult with
                 | Some r -> 
                     // Got a result, stop waiting and return it
                     return Some r
@@ -253,8 +254,9 @@ let handleEventsWithTimeout duration handler =
                     // No result, keep waiting
                     return! tryHandleEvent timerId handler
 
-            // Non-matching timer- keep waiting
-            | _ -> return! tryHandleEvent timerId handler
+            | _ -> 
+                // Non-matching timer- keep waiting
+                return! tryHandleEvent timerId handler
         }
 
     proc {
@@ -271,7 +273,7 @@ let handleEventsWithTimeout duration handler =
             return result
     }
 
-let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
+let tryOnEvent duration selectCont: SmProc<'state, 'event, 'command, 'result option> =
     let handler e = proc {
         match selectCont e with
         | Some pnext -> 
@@ -288,9 +290,9 @@ let tryOnEvent duration selectCont: TestProc<'state, 'event, 'command, 'result o
     handleEventsWithTimeout duration handler
 
 let tryWaitForEvent duration predicate =
-    tryOnEvent duration (predicate >> Option.map Proc.returnProc)
+    tryOnEvent duration (predicate >> Option.map Proc.retn)
 
-let tryOnState duration selectCont: TestProc<'state, 'event, 'command, 'result option> =
+let tryOnState duration selectCont: SmProc<'state, 'event, 'command, 'result option> =
     let handler e = proc {
         // Apply default update
         let! newState = Proc.setState (defaultUpdate e)
@@ -309,7 +311,7 @@ let tryOnState duration selectCont: TestProc<'state, 'event, 'command, 'result o
     handleEventsWithTimeout duration handler
 
 let tryWaitForState duration predicate =
-    tryOnState duration (predicate >> Option.map Proc.returnProc)
+    tryOnState duration (predicate >> Option.map Proc.retn)
 
 type Event =
     | Type1 of int
@@ -374,34 +376,40 @@ let fireCommand cmd = proc {
     return ()
     }
 
+type TestResult<'t> =
+    | Pass of 't
+    | Fail of string
+
 let tc2 = proc {
     let timeout = TimeSpan.FromSeconds 1.0
 
     let! e1 = tryWaitForEvent timeout eventType1
+
+    if e1.IsNone then return Fail "timed out" else
 
     do! fireCommand <| string e1
 
     let! e2 = onEventType2 timeout event2Handler
 
     let! e3 = 
-        tryOnEvent timeout (function 
+        tryOnEvent timeout <| function 
             | Type1 e1 -> Some <| proc { return sprintf "Got a type1 event %A" e1 }
             | Type2 e2 -> Some <| proc { return sprintf "Got a type2 event %A" e2 }
-            | _ -> None)
+            | _ -> None
 
     do! fireCommand "do something"
 
     let! eventOrTimeout = 
         tryWaitForEvent timeout eventType1 >>= function 
-            | Some e4 -> returnProc (sprintf "event %A" e4)
-            | None -> returnProc "timeout"
+            | Some e4 -> retn (sprintf "event %A" e4)
+            | None -> retn "timeout"
 
     let! eventOrTimeout2 = 
         tryWaitForEvent timeout eventType1 <!> function 
             | Some e4 -> sprintf "event %A" e4
             | None -> "timeout"
 
-    return e1, e2, e3, eventOrTimeout, eventOrTimeout2
+    return Pass (e1, e2, e3, eventOrTimeout, eventOrTimeout2)
     }
 
 startTc machine tc2 |> processResult 
@@ -410,3 +418,56 @@ startTc machine tc2 |> processResult
 |> stepTc (MachineEvent (Type2 "123 #2")) |> processResult 
 |> stepTc (TimerExpired 4) |> processResult 
 |> stepTc (MachineEvent (Type1 111)) |> processResult
+
+module Test =
+    type Test<'s, 'e, 'c, 'a> = SmProc<'s, 'e, 'c, TestResult<'a>>
+    
+    let bind f t = proc {
+        let! result = t
+        match result with
+        | Pass value -> return! f value
+        | Fail reason -> return Fail reason
+    }
+
+    let map f = bind (fun s -> f s |> Proc.retn)
+
+    let retn v = Proc.retn (Pass v)
+
+    let liftProc = Proc.map Pass
+
+    type TestBuilder() =
+        member x.Bind(t, f) = bind f t
+        member x.Return(v) = retn v
+
+    let test = TestBuilder()
+
+    let onEvent timeout next = 
+        tryOnEvent timeout next <!> function
+            | Some r -> Pass r
+            | None -> Fail "Timed out waiting for event"
+
+    let waitForEvent timeout predicate =
+        tryWaitForEvent timeout predicate <!> function
+            | Some r -> Pass r
+            | None -> Fail "Timed out waiting for event"
+
+open Test
+
+let testCase1 = test {
+    let timeout = TimeSpan.FromSeconds 1.0
+    
+    let! e1 = waitForEvent timeout eventType1
+    
+    let! e2 = waitForEvent timeout eventType1
+
+    let! e3 = tryWaitForEvent timeout eventType1 |> liftProc
+
+    return "yeah! I passed!", e1, e2
+}
+
+startTc machine testCase1 |> processResult
+|> stepTc (MachineEvent (Type1 42)) |> processResult
+|> stepTc (MachineEvent (Type1 43)) |> processResult
+
+startTc machine testCase1 |> processResult
+|> stepTc (TimerExpired 1) |> processResult
