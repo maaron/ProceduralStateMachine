@@ -208,7 +208,8 @@ module Proc =
             }
 
         coroutine {
-            let! state = Co.setState update
+            let! state = Co.getState
+            let! _ = Co.setState update
             return state.nextTimerId
         }
 
@@ -288,8 +289,8 @@ module Proc =
 
         handleEventsWithTimeout duration handler
 
-    let tryWaitForEvent duration predicate =
-        tryOnEvent duration (predicate >> Option.map Co.retn)
+    let tryWaitForEvent timeout filter =
+        tryOnEvent timeout (filter >> Option.map Co.retn)
 
     let tryOnState duration selectCont: Proc<'state, 'event, 'command, 'result option> =
         let handler e = coroutine {
@@ -403,12 +404,12 @@ let tc2 = coroutine {
     let! eventOrTimeout = 
         tryWaitForEvent timeout eventType1 >>= function 
             | Some e4 -> retn (sprintf "event %A" e4)
-            | None -> retn "timeout"
+            | None -> retn "timeout  (bind)"
 
     let! eventOrTimeout2 = 
         tryWaitForEvent timeout eventType1 <!> function 
             | Some e4 -> sprintf "event %A" e4
-            | None -> "timeout"
+            | None -> "timeout (map)"
 
     return Pass (e1, e2, e3, eventOrTimeout, eventOrTimeout2)
     }
@@ -417,7 +418,7 @@ startTc machine tc2 |> processResult
 |> stepTc (MachineEvent (Type1 2345)) |> processResult
 |> stepTc (MachineEvent (Type2 "12345")) |> processResult 
 |> stepTc (MachineEvent (Type2 "123 #2")) |> processResult 
-|> stepTc (TimerExpired 4) |> processResult 
+|> stepTc (TimerExpired 3) |> processResult 
 |> stepTc (MachineEvent (Type1 111)) |> processResult
 
 module Test =
@@ -452,23 +453,37 @@ module Test =
             | Some r -> Pass r
             | None -> Fail "Timed out waiting for event"
 
+    let mapFail message =
+        function
+        | Some r -> Pass r
+        | None -> Fail message
+
+    let waitForEvent1 timeout =
+        tryWaitForEvent timeout (function | Type1 e -> Some e | _ -> None) 
+        <!> mapFail "Timed out waiting for event 1"
+
+    let waitForEvent2 timeout =
+        tryWaitForEvent timeout (function | Type2 e -> Some e | _ -> None) 
+        <!> mapFail "Timed out waiting for event 2"
+
 open Test
 
 let testCase1 = test {
     let timeout = TimeSpan.FromSeconds 1.0
     
-    let! e1 = waitForEvent timeout eventType1
+    let! e1 = waitForEvent1 timeout
     
     let! e2 = waitForEvent timeout eventType1
 
     let! e3 = tryWaitForEvent timeout eventType1 |> liftProc
 
-    return "yeah! I passed!", e1, e2
+    return "yeah! I passed!", e1, e2, e3
 }
 
 startTc machine testCase1 |> processResult
 |> stepTc (MachineEvent (Type1 42)) |> processResult
 |> stepTc (MachineEvent (Type1 43)) |> processResult
+|> stepTc (MachineEvent (Type1 44)) |> processResult
 
 startTc machine testCase1 |> processResult
-|> stepTc (TimerExpired 1) |> processResult
+|> stepTc (TimerExpired 0) |> processResult
