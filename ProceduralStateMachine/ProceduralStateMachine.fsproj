@@ -48,6 +48,7 @@
     <None Include="Script.fsx" />
     <None Include="NoAsync.fsx" />
     <None Include="MessageSequenceParsers.fsx" />
+    <None Include="ImperativeBuilder.fsx" />
     <None Include="MessageSequenceParsers2.fsx" />
   </ItemGroup>
   <PropertyGroup>
