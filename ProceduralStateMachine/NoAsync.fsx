@@ -18,6 +18,37 @@ module Seq =
                 stop <- predicate en.Current
         }
 
+// I think there might be a slightly better design possible here, although I doubt it changes the 
+// overall interface.  The Co type is currently parameterized over a state ('s) type that actually
+// will contain the events and commands when used in practice.  But, the Wait enum is solely there
+// for indicating whether to wait for an event.  It may be better to just parameterize Co over the 
+// event type explicitly (and maybe the command, too?).  Maybe something like this:
+//
+// type Co<'e, 's, 'a> =
+//   | Wait of ('e -> 's -> R<'s, 'a>)
+//   | Ready of ('s -> R<'s, 'a>)
+//
+// If we let commands be parameterized over the event type (useful for making machines 
+// composable), we might change the R type to this:
+//
+// type R<'e, 's, 'a> =
+//   | Done of 's, Cmd<'e>, 'a
+//   | Next of 's, Cmd<'a>, Co<'e, 's, 'a>
+//
+// This also implies moving the Cmd-aggregating code into the Co bind function, very much like a 
+// writer monad.  I think the benefit here might be more type-safe use of the ultimate state type 
+// used:
+//
+// type ProcedureState<'s, 'e, 'c> = 
+//   { state: 's
+//     event: ProcEvent<'e>
+//     command: Cmd<ProcCmd<'c>>
+//     machine: M<'s, 'e, 'c>
+//     nextTimerId: TimerId }
+//
+// We can pull the event and command fields out of this, instead of exposing them for accidental 
+// update/use by the state-modifying functions.
+
 module Co =
     type Wait = Waiting | Ready
 
