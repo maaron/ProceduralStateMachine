@@ -45,11 +45,13 @@
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Library1.fs" />
+    <None Include="NoAsync2.fsx" />
     <None Include="Script.fsx" />
-    <None Include="NoAsync.fsx" />
     <None Include="MessageSequenceParsers.fsx" />
     <None Include="ImperativeBuilder.fsx" />
     <None Include="MessageSequenceParsers2.fsx" />
+    <None Include="Runtime.fsx" />
+    <None Include="NoAsync.fsx" />
   </ItemGroup>
   <PropertyGroup>
     <MinimumVisualStudioVersion Condition="'$(MinimumVisualStudioVersion)' == ''">11</MinimumVisualStudioVersion>
