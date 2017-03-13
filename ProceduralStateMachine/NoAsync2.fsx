@@ -49,48 +49,60 @@ module Seq =
 // We can pull the event and command fields out of this, instead of exposing them for accidental 
 // update/use by the state-modifying functions.
 
-type Cmd<'e> = 'e list
+type Cmd<'e> = 
+    abstract member Run: ('e -> unit) -> unit
 
 module Cmd =
-    let map f c = List.map f c
+    let map f (c: Cmd<_>) = 
+      { new Cmd<_> with 
+            member this.Run (callback) = c.Run (fun e -> callback (f e)) }
 
-    let mappend l1 l2 = List.append l1 l2
+    let mappend (ca: Cmd<_>) (cb: Cmd<_>) =
+      { new Cmd<_> with
+            member this.Run (callback) = 
+                ca.Run (callback)
+                cb.Run (callback) }
 
-    let none = List.empty
+    let none =
+      { new Cmd<_> with
+            member this.Run (callback) = () }
+
+    type DataCmd<'d, 'e>(d: 'd, f) =
+        member this.Data = d
+
+        interface Cmd<'e> with
+            member this.Run (callback) = f callback
+        
+        override this.Equals (o) = 
+            match o with
+            | :? DataCmd<'d, 'e> as dc -> Unchecked.equals this.Data dc.Data
+            | _ -> false
+
+    let data d f = DataCmd(d, f)
 
 module Co =
-    type Wait = Waiting | Ready
-
     type Co<'e, 's, 'a> =
-        | Ready of ('s -> Result<'e, 's, 'a>)
-        | Waiting of ('e -> 's -> Result<'e, 's, 'a>)
-
-    and Result<'e, 's, 'a> = 's * Cmd<'e> * Step<'e, 's, 'a>
-    
-    and Step<'e, 's, 'a> =
         | Done of 'a
-        | Next of Co<'e, 's, 'a>
+        | Ready of ('s -> Result<'e, 's, 'a>)
+        | Waiting of ('e -> Co<'e, 's, 'a>)
 
-    let rec runReadyResult (s, cmd, step) =
-        match step with
-        | Next (Ready k) -> 
+    and Result<'e, 's, 'a> = 's * Cmd<'e> * Co<'e, 's, 'a>
+    
+    let rec runReadyResult (s, cmd, co) =
+        match co with
+        | Ready k -> 
             let (s', cmd', step') = k s
             runReadyResult (s', Cmd.mappend cmd cmd', step')
 
-        | _ -> (s, cmd, step)
+        | _ -> (s, cmd, co)
 
     let rec bind (f: 'a -> Co<'e, 's, 'b>) (co: Co<'e, 's, 'a>): Co<'e, 's, 'b> =
-        // Result<'e, 's, 'a> -> Result<'e, 's, 'b>
-        let mapResult (s, cmd, step) = 
-            let step' =
-                match step with
-                | Done a -> Next (f a)
-                | Next co' -> Next (bind f co')
-            runReadyResult (s, cmd, step')
-
         match co with
-        | Ready k -> Ready (fun s -> mapResult (k s))
-        | Waiting k -> Waiting (fun e s -> mapResult (k e s))
+        | Done a -> f a
+        | Ready k -> Ready (fun s -> 
+            let (s', cmd, co') = k s
+            runReadyResult (s', cmd, bind f co'))
+        | Waiting k -> Waiting (fun e -> bind f (k e))
 
     let (>>=) p f = bind f p
 
@@ -107,19 +119,17 @@ module Co =
 
     // Starts a procedure by returning the first result
     let start co s = 
-        let firstResult = 
-            match co with
-            | Co (Ready, cont) -> cont s
-            | Co (Waiting, cont) -> Next (s, p)
-        readyStep firstResult
+        match co with
+        | Ready k -> runReadyResult (k s)
+        | _ -> (s, Cmd.none, co)
 
     // Steps a procedure along by returning the next result.  It is recursive, as internally it 
     // actually steps until the procedure indicates it is waiting for the next input
-    let step (s: 's) (r: R<'s, 'a>): R<'s, 'a> =
+    let step (e: 'e) (r: Result<'e, 's, 'a>): Result<'e, 's, 'a> =
         // Unless we're already done, get the next result and immediately process any "ready" 
         // procedures
         match r with
-        | Next (_, Co (_, cont)) -> cont s |> readyStep 
+        | (s', cmd, Waiting k) -> runReadyResult (s', cmd, k e)
         | _ -> r
 
     // Applies a sequence of events to a result, stopping early if the procedure completes.
@@ -127,7 +137,7 @@ module Co =
         let next result event = step event result
 
         let isDone = function
-            | Done _ -> true
+            | (_, _, Done _) -> true
             | _ -> false
 
         Seq.scan next result events
@@ -141,18 +151,16 @@ module Co =
         start proc event |> stepAll events
 
     // A procedure that just returns the current state
-    let getState: Co<'s, 's> = 
-        Co (Ready, fun s -> Done (s, s))
+    let getState = Ready (fun s -> s, Cmd.none, Done s)
 
     // A procedure that waits for and returns the next state
-    let getNextState: Co<'s, 's> =
-        Co (Waiting, fun s -> Done (s, s))
+    let getNextState = Waiting retn
     
     // A procedure that applies a function to modify the state
-    let setState f =
-        let cont s = let snew = f s in Done (snew, snew)
-        Co (Ready, cont)
-    
+    let setState f = Ready (fun s -> f s, Cmd.none, Done ())
+
+    let tell cmd = Ready (fun s -> s, cmd, Done ())
+
     let coroutine = PBuilder()
 
 open Co
@@ -204,19 +212,6 @@ let (event, events) = "0", [ for i in 1 .. 20 do yield i.ToString() ]
 
 let result = run event events p3
 
-module Cmd =
-    type Cmd<'c> = | List of 'c list
-
-    let map f (List l) = List (List.map f l)
-
-    let none = List []
-
-    let one c = List [c]
-
-    let add cmd (List l) = List (cmd :: l)
-
-    let batch cmds = List [ for (List l) in cmds do for c in l do yield c ]
-
 open Cmd
 
 module Proc =
@@ -228,66 +223,56 @@ module Proc =
         | TimerExpired of TimerId
         | MachineEvent of 'e
 
-    type ProcCmd<'c> =
+    type ProcCmd<'e> =
         | StartTimer of TimerId * System.TimeSpan
         | StopTimer of TimerId
         | Automation of string * ((string * string) list)
-        | MachineCommand of 'c
+        | MachineCommand of Cmd<'e>
+        interface Cmd<ProcEvent<'e>> with
+            member this.Run (callback) = () // TODO
 
-    type M<'s, 'e, 'c> = {
-        init: 's * Cmd<'c>
-        update: 'e -> 's -> 's * Cmd<'c>
+    type M<'s, 'e> = {
+        init: 's * Cmd<'e>
+        update: 'e -> 's -> 's * Cmd<'e>
     }
 
-    type ProcState<'s, 'e, 'c> = {
-        state: 's
-        event: ProcEvent<'e>
-        command: Cmd<ProcCmd<'c>>
-        machine: M<'s, 'e, 'c>
-        nextTimerId: TimerId
-        }
+    type ProcState<'s, 'e> = 
+      { state: 's
+        machine: M<'s, 'e>
+        nextTimerId: TimerId }
 
-    type Proc<'s, 'e, 'c, 'r> = Co<ProcState<'s, 'e, 'c>, 'r>
+    type Proc<'s, 'e, 'r> = Co<ProcEvent<'e>, ProcState<'s, 'e>, 'r>
 
     let startWaitTimer duration = 
         let update state =
-            { state with 
-                nextTimerId = state.nextTimerId + 1
-                command = 
-                    Cmd.add (StartTimer (state.nextTimerId, duration)) state.command 
-            }
+            { state with nextTimerId = state.nextTimerId + 1 }
 
         coroutine {
             let! state = Co.getState
             let! _ = Co.setState update
+            do! tell (StartTimer (state.nextTimerId, duration))
             return state.nextTimerId
         }
 
     let stopWaitTimer timerId = 
-        let update state =
-            { state with 
-                command = 
-                    Cmd.add (StopTimer timerId) state.command 
-            }
+        tell (StopTimer timerId)
 
+    let defaultUpdate (event: 'e): Proc<'s, 'e, unit> =
         coroutine {
-            let! state = Co.setState update
-            return ()
+            let! ps = getState
+            let (s', cmd) = ps.machine.update event ps.state
+            do! setState (fun s -> { s with state = s' })
+            do! tell (Cmd.map MachineCommand cmd)
         }
 
-    let defaultUpdate event testState =
-        let (newState, newCmd) = testState.machine.update event testState.state
-        { testState with
-            state = newState
-            command = Cmd.batch [(Cmd.map MachineCommand newCmd); testState.command]
-        }
+        
 
     let handleEventsWithTimeout duration handler =
         let rec tryHandleEvent timerId handler =
             coroutine {
-                let! state = Co.getNextState
+                let! pe = Co.getNextState
 
-                match state.event with
+                match pe with
                 | TimerExpired id when id = timerId -> 
                     // Timer expired, stop waiting
                     return None
@@ -323,7 +308,7 @@ module Proc =
                 return result
         }
 
-    let tryOnEvent duration selectCont: Proc<'state, 'event, 'command, 'result option> =
+    let tryOnEvent duration selectCont: Proc<'state, 'event, 'result option> =
         let handler e = coroutine {
             match selectCont e with
             | Some pnext -> 
@@ -333,7 +318,7 @@ module Proc =
 
             | None -> 
                 // Predicate doesn't match, apply default update and keep waiting
-                let! s1 = Co.setState (defaultUpdate e)
+                do! defaultUpdate e
                 return None
         }
 
