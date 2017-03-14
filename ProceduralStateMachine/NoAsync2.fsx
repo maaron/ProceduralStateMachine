@@ -49,46 +49,26 @@ module Seq =
 // We can pull the event and command fields out of this, instead of exposing them for accidental 
 // update/use by the state-modifying functions.
 
-type Cmd<'e> = 
-    abstract member Run: ('e -> unit) -> unit
+type Cmd<'e> = 'e list
 
 module Cmd =
-    let map f (c: Cmd<_>) = 
-      { new Cmd<_> with 
-            member this.Run (callback) = c.Run (fun e -> callback (f e)) }
+    let map = List.map
 
-    let mappend (ca: Cmd<_>) (cb: Cmd<_>) =
-      { new Cmd<_> with
-            member this.Run (callback) = 
-                ca.Run (callback)
-                cb.Run (callback) }
+    let mappend = List.append
 
-    let none =
-      { new Cmd<_> with
-            member this.Run (callback) = () }
+    let none = List.empty
 
-    type DataCmd<'d, 'e>(d: 'd, f) =
-        member this.Data = d
-
-        interface Cmd<'e> with
-            member this.Run (callback) = f callback
-        
-        override this.Equals (o) = 
-            match o with
-            | :? DataCmd<'d, 'e> as dc -> Unchecked.equals this.Data dc.Data
-            | _ -> false
-
-    let data d f = DataCmd(d, f)
+    let one = List.singleton
 
 module Co =
-    type Co<'e, 's, 'a> =
+    type Co<'e, 's, 'c, 'a> =
         | Done of 'a
-        | Ready of ('s -> Result<'e, 's, 'a>)
-        | Waiting of ('e -> Co<'e, 's, 'a>)
+        | Ready of ('s -> Result<'e, 's, 'c, 'a>)
+        | Waiting of ('e -> Co<'e, 's, 'c, 'a>)
 
-    and Result<'e, 's, 'a> = 's * Cmd<'e> * Co<'e, 's, 'a>
+    and Result<'e, 's, 'c, 'a> = 's * Cmd<'c> * Co<'e, 's, 'c, 'a>
     
-    let rec runReadyResult (s, cmd, co) =
+    let rec runReadyResult (s: 's, cmd: Cmd<'c>, co: Co<'e, 's, 'c, 'a>) =
         match co with
         | Ready k -> 
             let (s', cmd', step') = k s
@@ -96,7 +76,7 @@ module Co =
 
         | _ -> (s, cmd, co)
 
-    let rec bind (f: 'a -> Co<'e, 's, 'b>) (co: Co<'e, 's, 'a>): Co<'e, 's, 'b> =
+    let rec bind (f: 'a -> Co<'e, 's, 'c, 'b>) (co: Co<'e, 's, 'c, 'a>): Co<'e, 's, 'c, 'b> =
         match co with
         | Done a -> f a
         | Ready k -> Ready (fun s -> 
@@ -123,13 +103,13 @@ module Co =
         | Ready k -> runReadyResult (k s)
         | _ -> (s, Cmd.none, co)
 
-    // Steps a procedure along by returning the next result.  It is recursive, as internally it 
-    // actually steps until the procedure indicates it is waiting for the next input
-    let step (e: 'e) (r: Result<'e, 's, 'a>): Result<'e, 's, 'a> =
-        // Unless we're already done, get the next result and immediately process any "ready" 
-        // procedures
+    // Steps a coroutine until it is waiting for the next event.  The returned result contains the 
+    // new state, accumulated commands, and a Co<...> representing the remainder of the routine 
+    // that can be run once the next event is received.  If the provided coroutine is already done
+    // or waiting, the coroutine is returned as-is.
+    let step (e: 'e) (r: Result<'e, 's, 'c, 'a>): Result<'e, 's, 'c, 'a> =
         match r with
-        | (s', cmd, Waiting k) -> runReadyResult (s', cmd, k e)
+        | (s', _, Waiting k) -> runReadyResult (s', Cmd.none, k e)
         | _ -> r
 
     // Applies a sequence of events to a result, stopping early if the procedure completes.
@@ -147,8 +127,8 @@ module Co =
     // procedure may not yet be complete when the function returns, as it may still be expecting 
     // further events.  In the event that the procedure completes before all the events are 
     // consumed, the function returns early.
-    let run event events proc =
-        start proc event |> stepAll events
+    let run init events proc =
+        start proc init |> stepAll events
 
     // A procedure that just returns the current state
     let getState = Ready (fun s -> s, Cmd.none, Done s)
@@ -164,54 +144,6 @@ module Co =
     let coroutine = PBuilder()
 
 open Co
-
-let p0 = coroutine { return 123 }
-
-let p1 (v: 'v) = coroutine { 
-    let! s = getState
-    return s, v 
-    }
-
-let p2 = coroutine {
-    let! s1 = p0
-    let! s2 = p0
-    return s1, s2
-    }
-
-let p3 = coroutine {
-    let! s = getState
-    let! a1, a2 = 
-        coroutine {
-            let! a1 = p1 1
-            let! a2 = p1 2
-            return a1, a2
-        }
-    let! s2 = getNextState
-    let! a3 = p1 3
-    let! s3 = getNextState
-    return a1, a2, a3, s, s2, s3
-    }
-
-start p0 "initial state"
-
-start (p1 "a") "1"
-
-start p2 "0"
-
-start p3 "0"
-start p3 "0" |> step "1"
-start p3 "0" |> step "1" |> step "2"
-start p3 "0" |> step "1" |> step "2" |> step "3"
-start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4"
-start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4" |> step "5"
-start p3 "0" |> step "1" |> step "2" |> step "3" |> step "4" |> step "50" |> step "60"
-
-start (coroutine { return! getState }) "asdf" |> step "qwer"
-
-let (event, events) = "0", [ for i in 1 .. 20 do yield i.ToString() ]
-
-let result = run event events p3
-
 open Cmd
 
 module Proc =
@@ -223,25 +155,23 @@ module Proc =
         | TimerExpired of TimerId
         | MachineEvent of 'e
 
-    type ProcCmd<'e> =
+    type ProcCmd<'c> =
         | StartTimer of TimerId * System.TimeSpan
         | StopTimer of TimerId
         | Automation of string * ((string * string) list)
-        | MachineCommand of Cmd<'e>
-        interface Cmd<ProcEvent<'e>> with
-            member this.Run (callback) = () // TODO
+        | MachineCommand of 'c
 
-    type M<'s, 'e> = {
-        init: 's * Cmd<'e>
-        update: 'e -> 's -> 's * Cmd<'e>
+    type M<'e, 's, 'c> = {
+        init: 's * Cmd<'c>
+        update: 'e -> 's -> 's * Cmd<'c>
     }
 
-    type ProcState<'s, 'e> = 
+    type ProcState<'e, 's, 'c> = 
       { state: 's
-        machine: M<'s, 'e>
+        machine: M<'e, 's, 'c>
         nextTimerId: TimerId }
 
-    type Proc<'s, 'e, 'r> = Co<ProcEvent<'e>, ProcState<'s, 'e>, 'r>
+    type Proc<'e, 's, 'c, 'r> = Co<ProcEvent<'e>, ProcState<'e, 's, 'c>, ProcCmd<'c>, 'r>
 
     let startWaitTimer duration = 
         let update state =
@@ -250,22 +180,20 @@ module Proc =
         coroutine {
             let! state = Co.getState
             let! _ = Co.setState update
-            do! tell (StartTimer (state.nextTimerId, duration))
+            do! tell (Cmd.one (StartTimer (state.nextTimerId, duration)))
             return state.nextTimerId
         }
 
     let stopWaitTimer timerId = 
-        tell (StopTimer timerId)
+        tell (Cmd.one (StopTimer timerId))
 
-    let defaultUpdate (event: 'e): Proc<'s, 'e, unit> =
+    let defaultUpdate (event: 'e): Proc<'e, 's, 'c, unit> =
         coroutine {
             let! ps = getState
             let (s', cmd) = ps.machine.update event ps.state
             do! setState (fun s -> { s with state = s' })
             do! tell (Cmd.map MachineCommand cmd)
         }
-
-        
 
     let handleEventsWithTimeout duration handler =
         let rec tryHandleEvent timerId handler =
@@ -308,7 +236,7 @@ module Proc =
                 return result
         }
 
-    let tryOnEvent duration selectCont: Proc<'state, 'event, 'result option> =
+    let tryOnEvent duration selectCont: Proc<'state, 'event, 'cmd, 'result option> =
         let handler e = coroutine {
             match selectCont e with
             | Some pnext -> 
@@ -330,7 +258,8 @@ module Proc =
     let tryOnState duration selectCont: Proc<'state, 'event, 'command, 'result option> =
         let handler e = coroutine {
             // Apply default update
-            let! newState = Co.setState (defaultUpdate e)
+            do! defaultUpdate e
+            let! newState = Co.getState
             
             match selectCont newState.state with
             | Some cont -> 
@@ -352,8 +281,6 @@ module Proc =
         let procState =
             { 
                 state = fst machine.init
-                event = Start
-                command = Cmd.map MachineCommand (snd machine.init)
                 machine = machine
                 nextTimerId = 0
             }
@@ -361,9 +288,7 @@ module Proc =
 
     let stepTc event result =
         printf "event: %A\n" event
-        match result with
-        | Done (s, a) -> Done ({ s with event = event }, a)
-        | Next (s, pnext) -> Co.step { s with event = event } result
+        Co.step event result
 
 open Proc
 
@@ -374,14 +299,15 @@ type Event =
 type Command = string
 
 let processResult result =
-    match result with
-    | Done (s, a) ->
+    let (s, cmd, co) = result
+    match co with
+    | Done a ->
         printf "test completed with %A\n" a
-        Done (s, a)
+        result
 
-    | Next (s, pnext) ->
-        printf "processing commands %A\n" s.command
-        Next ({ s with command = Cmd.none }, pnext)
+    | _ ->
+        printf "processing commands %A\n" cmd
+        result
 
 let eventType1 event =
     match event with 
@@ -408,10 +334,7 @@ let onEventType2 timeout proc =
 
 let event2Handler (event: string) = coroutine { return event.Length }
 
-let fireCommand cmd = coroutine { 
-    let! _ = setState (fun s -> { s with command = Cmd.add (MachineCommand cmd) s.command })
-    return ()
-    }
+let fireCommand cmd = Co.tell (Cmd.map MachineCommand (Cmd.one cmd))
 
 type TestResult<'t> =
     | Pass of 't
