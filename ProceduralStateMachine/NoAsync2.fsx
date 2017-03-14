@@ -13,16 +13,6 @@ let until p f a =
 
 fsi.ShowDeclarationValues <- false
 
-module Seq =
-    let takeUntil predicate (sequence: IEnumerable<'t>) =
-        seq {
-            use en = sequence.GetEnumerator()
-            let mutable stop = false
-            while not stop && en.MoveNext() do
-                yield en.Current
-                stop <- predicate en.Current
-        }
-
 // This implementation uses a simple list structure for commands.  Also, the command type is 
 // completely distrinct from the event type.  The advantages of this approach are:
 //
@@ -117,24 +107,6 @@ module Co =
         | (s', _, Waiting k) -> runReadyResult (s', Cmd.none, k e)
         | _ -> r
 
-    // Applies a sequence of events to a result, stopping early if the procedure completes.
-    let stepAll events result =
-        let next result event = step event result
-
-        let isDone = function
-            | (_, _, Done _) -> true
-            | _ -> false
-
-        Seq.scan next result events
-        |> Seq.takeUntil isDone
-
-    // Runs a procedure by stepping it for all the events in the sequence.  Note that the 
-    // procedure may not yet be complete when the function returns, as it may still be expecting 
-    // further events.  In the event that the procedure completes before all the events are 
-    // consumed, the function returns early.
-    let run init events proc =
-        start proc init |> stepAll events
-
     // A coroutine that just returns the current state
     let get = Ready (fun s -> s, Cmd.none, Done s)
 
@@ -144,7 +116,7 @@ module Co =
     // A coroutine that applies a function to modify the state
     let modify f = Ready (fun s -> f s, Cmd.none, Done ())
 
-    // A coroutine that generates the supplies command
+    // A coroutine that generates the supplied command
     let tell cmd = Ready (fun s -> s, cmd, Done ())
 
     let coroutine = PBuilder()
@@ -164,30 +136,30 @@ module Proc =
     type ProcCmd<'c> =
         | StartTimer of TimerId * System.TimeSpan
         | StopTimer of TimerId
-        | Automation of string * ((string * string) list)
         | MachineCommand of 'c
 
-    type M<'e, 's, 'c> = {
-        init: 's * Cmd<'c>
-        update: 'e -> 's -> 's * Cmd<'c>
-    }
+    type Machine<'e, 's, 'c> =
+      { init: 's * Cmd<'c>
+        update: 'e -> 's -> 's * Cmd<'c> }
 
     type ProcState<'e, 's, 'c> = 
       { state: 's
-        machine: M<'e, 's, 'c>
+        machine: Machine<'e, 's, 'c>
         nextTimerId: TimerId }
 
+    // A "proc" is a coroutine that includes the "default update" semantics provided by a state 
+    // machine and timers.
     type Proc<'e, 's, 'c, 'r> = Co<ProcEvent<'e>, ProcState<'e, 's, 'c>, ProcCmd<'c>, 'r>
 
     let startWaitTimer duration = 
-        let update state =
-            { state with nextTimerId = state.nextTimerId + 1 }
+        let incTimerId = Co.modify (fun s -> { s with nextTimerId = s.nextTimerId + 1 })
+        let getTimerId = Co.get <!> (fun s -> s.nextTimerId)
 
         coroutine {
-            let! state = Co.get
-            let! _ = Co.modify update
-            do! tell (Cmd.one (StartTimer (state.nextTimerId, duration)))
-            return state.nextTimerId
+            let! timerId = getTimerId
+            do! incTimerId
+            do! tell (Cmd.one (StartTimer (timerId, duration)))
+            return timerId
         }
 
     let stopWaitTimer timerId = 
@@ -451,3 +423,16 @@ startTc machine testCase1 |> processResult
 
 startTc machine testCase1 |> processResult
 |> stepTc (TimerExpired 0) |> processResult
+
+let f3: Proc<_, _, string, _> = coroutine { return 123 }
+
+let f2 = coroutine { 
+    let! x = f3 
+    failwith "qwer"
+    return x
+    }
+
+let f1 = coroutine { return! f2 }
+
+startTc machine f1 |> processResult
+|> stepTc (MachineEvent (Type1 42)) |> processResult
